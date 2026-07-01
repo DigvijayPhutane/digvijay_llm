@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+models/
+.digvijay_offload/
+*.gguf
+*.safetensors
+.venv/
+build/
+dist/
+*.egg-info/

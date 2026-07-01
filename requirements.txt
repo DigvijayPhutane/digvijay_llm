@@ -1,0 +1,11 @@
+# Core (always required)
+psutil>=5.9.0
+
+# GGUF backend (recommended path — fast, mmap-based disk streaming)
+llama-cpp-python>=0.2.0
+
+# Safetensors/HF backend (for raw, non-GGUF checkpoints)
+torch>=2.0.0
+transformers>=4.38.0
+accelerate>=0.27.0
+safetensors>=0.4.0
