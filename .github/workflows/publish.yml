@@ -1,17 +1,29 @@
-[build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
+name: Publish to PyPI
 
-[project]
-name = "digvijay_llm"
-version = "0.1.0"
-description = "Run 70B LLMs on low-RAM machines by streaming weights from disk"
-readme = "README.md"
-license = {file = "LICENSE"}
-requires-python = ">=3.9"
-dependencies = ["psutil>=5.9.0"]
+on:
+  push:
+    tags:
+      - "v*"
 
-[project.optional-dependencies]
-gguf = ["llama-cpp-python>=0.2.0"]
-hf = ["torch>=2.0.0", "transformers>=4.38.0", "accelerate>=0.27.0", "safetensors>=0.4.0"]
-all = ["llama-cpp-python>=0.2.0", "torch>=2.0.0", "transformers>=4.38.0", "accelerate>=0.27.0", "safetensors>=0.4.0"]
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build package
+        run: python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
