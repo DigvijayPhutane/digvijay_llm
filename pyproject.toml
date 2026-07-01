@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "digvijay_llm"
-version = "0.1.0"
+version = "0.1.1"
 description = "Run 70B LLMs on low-RAM machines by streaming weights from disk"
 readme = "README.md"
 license = { file = "LICENSE" }
