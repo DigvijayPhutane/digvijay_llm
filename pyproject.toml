@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "digvijay_llm"
-version = "0.1.2"
+version = "0.2.0"
 description = "Run local LLMs on low-RAM machines with automatic hardware detection and streaming inference"
 readme = "README.md"
 license = { file = "LICENSE" }
