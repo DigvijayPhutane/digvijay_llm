@@ -22,9 +22,12 @@ machinery (the same machinery HF itself recommends for low-RAM inference),
 wrapped here with sane defaults + the digvijay_llm.generate() interface.
 """
 
-import os
 import gc
-from typing import Optional, Iterator
+import logging
+import os
+from typing import Callable, Iterator, Optional
+
+logger = logging.getLogger("digvijay_llm")
 
 
 class SafetensorsLayerStreamer:
@@ -54,6 +57,8 @@ class SafetensorsLayerStreamer:
         n_ram_gb: float = 16.0,
         dtype: str = "float16",
         device: str = "cpu",
+        n_ctx: Optional[int] = None,
+        n_batch: Optional[int] = None,
     ):
         if not os.path.isdir(model_dir):
             raise FileNotFoundError(f"model_dir not found: {model_dir}")
@@ -73,6 +78,9 @@ class SafetensorsLayerStreamer:
         self._torch = torch
         self.model_dir = model_dir
         self.offload_dir = offload_dir or os.path.join(model_dir, ".digvijay_offload")
+        self.device = device
+        self.n_ctx = n_ctx or 2048
+        self.n_batch = n_batch or 4
         os.makedirs(self.offload_dir, exist_ok=True)
 
         torch_dtype = torch.float16 if dtype == "float16" else torch.float32
@@ -135,6 +143,7 @@ class SafetensorsLayerStreamer:
         max_tokens: int = 256,
         temperature: float = 0.7,
         top_p: float = 0.9,
+        callback: Optional[Callable[[str], None]] = None,
     ) -> str:
         torch = self._torch
         inputs = self._tokenizer(prompt, return_tensors="pt")
@@ -151,7 +160,7 @@ class SafetensorsLayerStreamer:
         gc.collect()
         return text
 
-    def stream_generate(self, prompt: str, max_tokens: int = 256, temperature: float = 0.7) -> Iterator[str]:
+    def stream_generate(self, prompt: str, max_tokens: int = 256, temperature: float = 0.7, callback: Optional[Callable[[str], None]] = None) -> Iterator[str]:
         """Token-by-token streaming using transformers' TextIteratorStreamer."""
         from transformers import TextIteratorStreamer
         import threading
@@ -171,5 +180,7 @@ class SafetensorsLayerStreamer:
         thread = threading.Thread(target=self._model.generate, kwargs=gen_kwargs)
         thread.start()
         for new_text in streamer:
+            if callback is not None:
+                callback(new_text)
             yield new_text
         thread.join()

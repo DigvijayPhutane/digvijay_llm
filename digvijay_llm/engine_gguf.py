@@ -12,8 +12,12 @@ inside digvijay_llm, with sane low-RAM defaults (no mlock, limited
 context, mmap forced on, conservative thread count).
 """
 
+import logging
 import os
-from typing import Optional, Iterator
+import time
+from typing import Any, Callable, Dict, Iterator, Optional
+
+logger = logging.getLogger("digvijay_llm")
 
 
 class GGUFStreamingEngine:
@@ -46,6 +50,9 @@ class GGUFStreamingEngine:
         n_gpu_layers: int = 0,
         n_threads: Optional[int] = None,
         verbose: bool = False,
+        n_ctx: Optional[int] = None,
+        n_batch: Optional[int] = None,
+        device: Optional[str] = None,
     ):
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"GGUF model not found at: {model_path}")
@@ -60,10 +67,16 @@ class GGUFStreamingEngine:
 
         self.model_path = model_path
         self.n_ram_gb = n_ram_gb
+        self.device = device or "cpu"
+        self.n_gpu_layers = n_gpu_layers
+        self.n_threads = n_threads or os.cpu_count() or 1
+        self.n_batch = n_batch or 4
 
         # Conservative context size: bigger context = bigger KV cache = more
         # RAM. We scale it down automatically on tight budgets.
-        if n_ram_gb <= 8:
+        if n_ctx is not None:
+            ctx = n_ctx
+        elif n_ram_gb <= 8:
             ctx = 1024
         elif n_ram_gb <= 16:
             ctx = 2048
@@ -72,15 +85,19 @@ class GGUFStreamingEngine:
         else:
             ctx = 8192
 
-        self._llm = Llama(
-            model_path=model_path,
-            n_ctx=ctx,
-            n_threads=n_threads or os.cpu_count(),
-            n_gpu_layers=n_gpu_layers,
-            use_mmap=True,   # critical: keeps weights disk-backed ("ROM"), not fully copied into RAM
-            use_mlock=False, # critical: do NOT force-pin pages into RAM, let the OS evict freely
-            verbose=verbose,
-        )
+        try:
+            self._llm = Llama(
+                model_path=model_path,
+                n_ctx=ctx,
+                n_threads=self.n_threads,
+                n_gpu_layers=n_gpu_layers,
+                n_batch=self.n_batch,
+                use_mmap=True,   # critical: keeps weights disk-backed ("ROM"), not fully copied into RAM
+                use_mlock=False, # critical: do NOT force-pin pages into RAM, let the OS evict freely
+                verbose=verbose,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Failed to initialize llama.cpp backend for '{model_path}': {exc}") from exc
         self._ctx_size = ctx
 
     def generate(
@@ -90,9 +107,10 @@ class GGUFStreamingEngine:
         temperature: float = 0.7,
         top_p: float = 0.9,
         stream: bool = False,
+        callback: Optional[Callable[[str], None]] = None,
     ):
         if stream:
-            return self._stream(prompt, max_tokens, temperature, top_p)
+            return self._stream(prompt, max_tokens, temperature, top_p, callback)
 
         out = self._llm(
             prompt,
@@ -102,7 +120,7 @@ class GGUFStreamingEngine:
         )
         return out["choices"][0]["text"]
 
-    def _stream(self, prompt, max_tokens, temperature, top_p) -> Iterator[str]:
+    def _stream(self, prompt, max_tokens, temperature, top_p, callback) -> Iterator[str]:
         for chunk in self._llm(
             prompt,
             max_tokens=max_tokens,
@@ -110,7 +128,10 @@ class GGUFStreamingEngine:
             top_p=top_p,
             stream=True,
         ):
-            yield chunk["choices"][0]["text"]
+            text = chunk["choices"][0]["text"]
+            if callback is not None:
+                callback(text)
+            yield text
 
     def chat(self, messages, max_tokens: int = 256, temperature: float = 0.7):
         """OpenAI-style chat interface, e.g.
@@ -119,6 +140,21 @@ class GGUFStreamingEngine:
             messages=messages, max_tokens=max_tokens, temperature=temperature
         )
         return out["choices"][0]["message"]["content"]
+
+    def benchmark(self, prompt: str, max_tokens: int = 64) -> Dict[str, Any]:
+        start = time.perf_counter()
+        text = self.generate(prompt, max_tokens=max_tokens)
+        elapsed = time.perf_counter() - start
+        prompt_tokens = max(1, len(prompt.split()))
+        completion_tokens = max(1, len(text.split()))
+        return {
+            "ttft_s": round(elapsed, 4),
+            "tokens_per_sec": round(completion_tokens / max(elapsed, 1e-6), 2),
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "backend": "gguf",
+            "device": self.device,
+        }
 
     @property
     def context_size(self) -> int:

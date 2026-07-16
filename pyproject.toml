@@ -4,11 +4,21 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "digvijay_llm"
-version = "0.1.1"
-description = "Run 70B LLMs on low-RAM machines by streaming weights from disk"
+version = "0.1.2"
+description = "Run local LLMs on low-RAM machines with automatic hardware detection and streaming inference"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
+authors = [{ name = "Digvijay Phutane" }]
+keywords = ["llm", "inference", "local", "gguf", "streaming"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
 
 dependencies = [
     "psutil>=5.9.0",

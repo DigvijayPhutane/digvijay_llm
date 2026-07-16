@@ -2,6 +2,8 @@
 
 Run big open-source LLMs — including 70B-class models — on machines with as little as **16 GB of RAM**, by streaming weights from disk instead of loading the full model into RAM.
 
+This version is more production-oriented: it can detect your hardware automatically, choose sensible defaults for backend/device/threading/context, expose the detected configuration through `llm.config`, and support streaming plus basic benchmarking.
+
 ```bash
 pip install digvijay_llm
 ```
@@ -42,33 +44,34 @@ pip install digvijay_llm[all]    # both backends
 
 ---
 
-## Step 1 — Detect your parameters (run this first!)
+## Step 1 — Automatic hardware detection
 
-Not sure what values to use for your machine? Run this before anything else:
+You no longer need to run a separate script first. `digvijay_llm` can detect your machine automatically when you create a model instance.
+
+```python
+from digvijay_llm import LowRAMLLM
+
+llm = LowRAMLLM.from_gguf("models/llama-70b.Q4_K_M.gguf")
+print(llm.config)
+print(llm.device_info)
+```
+
+The library will infer a sensible configuration for:
+
+- backend selection
+- GPU vs CPU placement
+- `n_gpu_layers`
+- `n_threads`
+- `n_ctx`
+- `n_batch`
+- `n_ram_gb`
+
+You can still override any of these manually when needed.
+
+If you want the older CLI-style report, the standalone script is still available:
 
 ```bash
-pip install psutil
 python detect_params.py
-```
-
-It auto-detects your RAM, GPU, VRAM, disk space, and CPU cores, then prints the **exact parameters to copy-paste** into your code:
-
-```
-📦 YOUR SYSTEM
-   RAM   : 16.0 GB total  |  12.3 GB free
-   Disk  : 512.0 GB total |  180.0 GB free
-   GPU   : NVIDIA RTX 3060  (CUDA)
-   VRAM  : 12.0 GB total  |  11.2 GB free
-
-[70B model]  ✅ CAN RUN  ⚡ Medium
-
-   👉 Use these parameters:
-      llm = LowRAMLLM.from_gguf(
-          "path/to/model.Q4_K_M.gguf",
-          n_ram_gb     = 16,
-          n_gpu_layers = 45,
-          n_threads    = 8,
-      )
 ```
 
 ---
@@ -93,9 +96,10 @@ from digvijay_llm import LowRAMLLM
 
 llm = LowRAMLLM.from_gguf(
     "models/llama-70b.Q4_K_M.gguf",
-    n_ram_gb     = 16,
-    n_gpu_layers = 0,    # set this from detect_params.py output
-    n_threads    = 8,    # set this from detect_params.py output
+    detect=True,      # default: auto-detect and tune the config
+    n_ram_gb=16,
+    n_gpu_layers=0,    # override if you want to force a different value
+    n_threads=8,
 )
 
 # Generate text
@@ -108,6 +112,9 @@ for token in llm.stream("Write a short poem about the sea."):
 # Chat interface
 reply = llm.chat([{"role": "user", "content": "Hello!"}])
 print(reply)
+
+# Basic benchmark summary
+print(llm.benchmark("Summarize the benefits of local inference."))
 ```
 
 ### Option B — Raw HuggingFace safetensors checkpoint (no conversion needed)
@@ -115,7 +122,7 @@ print(reply)
 ```python
 from digvijay_llm import LowRAMLLM
 
-llm = LowRAMLLM.from_safetensors("models/llama-3-70b-hf/", n_ram_gb=16)
+llm = LowRAMLLM.from_safetensors("models/llama-3-70b-hf/", detect=True, n_ram_gb=16)
 print(llm.generate("Write a haiku about the ocean."))
 ```
 
@@ -128,6 +135,19 @@ llm = LowRAMLLM.auto("models/llama-3-70b.Q4_K_M.gguf", n_ram_gb=16)
 # or
 llm = LowRAMLLM.auto("models/llama-3-70b-hf/", n_ram_gb=16)
 ```
+
+The same auto-detection logic applies here; the library will inspect the current machine and choose sensible runtime settings.
+
+---
+
+## New in this version
+
+- Built-in hardware detection for CPU, CUDA, ROCm, Metal, and Intel XPU-style backends
+- Automatic tuning for `n_gpu_layers`, `n_threads`, `n_ctx`, `n_batch`, and `n_ram_gb`
+- `llm.config` and `llm.device_info` for inspecting the detected settings
+- Streaming with callback support via `llm.stream(...)`
+- Basic benchmark helpers via `llm.benchmark(...)`
+- Clearer runtime error handling for missing optional dependencies
 
 ---
 
@@ -212,11 +232,13 @@ digvijay_llm/               ← repo root
 │   ├── api.py
 │   ├── engine_gguf.py
 │   ├── engine_safetensors.py
+│   ├── hardware.py
 │   └── ram_planner.py
 ├── examples/
 │   ├── run_gguf_example.py
 │   └── run_safetensors_example.py
 ├── tests/
+│   ├── test_hardware_detection.py
 │   └── test_ram_planner.py
 ├── .github/
 │   └── workflows/

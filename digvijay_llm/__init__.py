@@ -50,6 +50,7 @@ from .engine_gguf import GGUFStreamingEngine
 from .engine_safetensors import SafetensorsLayerStreamer
 from .api import LowRAMLLM
 from .ram_planner import RAMPlanner, plan_for_budget
+from .hardware import SystemInfo, detect_params, detect_system, recommend_config
 
 __all__ = [
     "LowRAMLLM",
@@ -57,6 +58,10 @@ __all__ = [
     "SafetensorsLayerStreamer",
     "RAMPlanner",
     "plan_for_budget",
+    "SystemInfo",
+    "detect_params",
+    "detect_system",
+    "recommend_config",
 ]
 
 __version__ = "0.1.0"
