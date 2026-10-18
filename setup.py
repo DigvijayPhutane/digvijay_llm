@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="digvijay_llm",
-    version="0.2.1",
+    version="0.2.2",
     description="Run local LLMs on low-RAM machines with automatic hardware detection, streaming inference, and backend selection.",
     long_description=open("README.md", encoding="utf-8").read() if __import__("os").path.exists("README.md") else "",
     long_description_content_type="text/markdown",
