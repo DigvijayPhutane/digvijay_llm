@@ -62,16 +62,21 @@ The library will infer a sensible configuration for:
 - GPU vs CPU placement
 - `n_gpu_layers`
 - `n_threads`
-- `n_ctx`
+- `n_ctx`: sized from your `n_ram_gb` budget, and never larger than the context the model was trained for
 - `n_batch`
 - `n_ram_gb`
 
 You can still override any of these manually when needed.
 
-If you want the older CLI-style report, the standalone script is still available:
+If a prompt doesn't fit the context window, the library keeps its most recent tokens (and the leading BOS token) and logs a warning. If `max_tokens` is larger than the room left, it is capped, the same way llama.cpp does it. Both backends follow the same rule.
+
+`chat()` trims whole messages instead, so the chat template stays intact. When a conversation outgrows the context, the oldest turns are dropped, the system message is always kept, and a warning says how many were dropped. If the newest message is too long on its own, you get a clear error.
+
+To see what will be picked without loading a model, run the standalone report. It uses the same detection code:
 
 ```bash
-python detect_params.py
+python detect_params.py                      # your hardware + typical model sizes
+python detect_params.py models/model.gguf    # exact settings for one model
 ```
 
 ---
@@ -98,7 +103,7 @@ llm = LowRAMLLM.from_gguf(
     "models/llama-70b.Q4_K_M.gguf",
     detect=True,      # default: auto-detect and tune the config
     n_ram_gb=16,
-    n_gpu_layers=0,    # override if you want to force a different value
+    # n_gpu_layers left unset = auto; 0 forces CPU, -1 offloads every layer
     n_threads=8,
 )
 
@@ -146,37 +151,53 @@ The same auto-detection logic applies here; the library will inspect the current
 - Automatic tuning for `n_gpu_layers`, `n_threads`, `n_ctx`, `n_batch`, and `n_ram_gb`
 - `llm.config` and `llm.device_info` for inspecting the detected settings
 - Streaming with callback support via `llm.stream(...)`
-- Basic benchmark helpers via `llm.benchmark(...)`
+- `llm.benchmark(...)` counts real model tokens and reports:
+  - `ttft_s`: time to first token.
+  - `total_s`: total time.
+  - `tokens_per_sec`: decode rate after the first token.
+  - `prompt_tokens` and `completion_tokens`.
 - Clearer runtime error handling for missing optional dependencies
 
 ---
 
 ## GPU support
 
-digvijay_llm works on **every machine** — no GPU, small GPU, or big GPU. Just set `n_gpu_layers` accordingly (or let `detect_params.py` pick it for you):
+digvijay_llm works on **every machine**, whether it has no GPU, a small one or a big one. If you leave `n_gpu_layers` unset, the library reads the model's file size and layer count (from the GGUF header). It then compares them with free VRAM, keeping 1 GB of headroom:
 
-| Your GPU VRAM | n_gpu_layers |
-|---|---|
-| No GPU | 0 |
-| 4 GB | 10–15 |
-| 6 GB | 20–25 |
-| 8 GB | 30–35 |
-| 12 GB | 45–50 |
-| 16 GB | 60–65 |
-| 24 GB+ | 80 (all layers, no disk streaming needed) |
-
-Layers that fit in VRAM run at full GPU speed. Layers that don't fit are streamed from disk automatically. You always get the best of both.
+- If the whole model fits, it uses `n_gpu_layers=-1`, which offloads every layer.
+- Otherwise it offloads the share of layers that fits, and llama.cpp keeps the rest on the CPU.
+- With no usable GPU it uses `0`.
 
 ```python
-# No GPU
+# Auto (recommended)
+llm = LowRAMLLM.from_gguf("model.gguf", n_ram_gb=16)
+
+# Force CPU
 llm = LowRAMLLM.from_gguf("model.gguf", n_ram_gb=16, n_gpu_layers=0)
 
-# Small GPU (8GB VRAM)
-llm = LowRAMLLM.from_gguf("model.gguf", n_ram_gb=16, n_gpu_layers=35)
+# Offload every layer
+llm = LowRAMLLM.from_gguf("model.gguf", n_ram_gb=16, n_gpu_layers=-1)
 
-# Big GPU (24GB+ VRAM) — everything fits, no disk streaming needed
-llm = LowRAMLLM.from_gguf("model.gguf", n_ram_gb=16, n_gpu_layers=80)
+# Manual split
+llm = LowRAMLLM.from_gguf("model.gguf", n_ram_gb=16, n_gpu_layers=35)
 ```
+
+`llm.config["warnings"]` holds anything detection noticed, and each warning is also logged.
+
+### You need GPU builds of the backends
+
+The default wheels from PyPI are CPU-only on Windows and Linux. If `nvidia-smi` finds a GPU but the installed backend can't use it, digvijay_llm warns and falls back to the CPU.
+
+- **GGUF (llama-cpp-python):** build it with CUDA:
+  ```bash
+  CMAKE_ARGS="-DGGML_CUDA=on" pip install --force-reinstall --no-cache-dir llama-cpp-python
+  ```
+  (Use `-DGGML_METAL=on` on macOS, or `-DGGML_HIPBLAS=on` for ROCm.)
+- **Safetensors (PyTorch):** install a CUDA wheel from the PyTorch index, for example:
+  ```bash
+  pip install torch --index-url https://download.pytorch.org/whl/cu128
+  ```
+  Check it with `python -c "import torch; print(torch.cuda.is_available())"`. AMD ROCm GPUs appear as `cuda` in PyTorch.
 
 ---
 
@@ -197,7 +218,9 @@ for w in plan.warnings:
     print("WARNING:", w)
 ```
 
-Warns you if your disk doesn't have enough free space or your RAM is too tight before you even try to load the model.
+This warns you, before you try to load the model, if your disk doesn't have enough free space or your RAM budget is too tight.
+
+> **This is an estimate, not a guarantee.** It assumes each layer is total weights ÷ `n_layers`, which ignores that embeddings and the output head are usually larger than one block. It reserves a fixed overhead margin instead of modeling the real KV cache (which grows with `n_ctx`), activations, or framework overhead. Measure actual memory use before you rely on a plan.
 
 ---
 
@@ -223,6 +246,25 @@ Warns you if your disk doesn't have enough free space or your RAM is too tight b
 
 ---
 
+## Testing
+
+```bash
+python -m unittest discover -s tests
+```
+
+The unit tests use fakes for torch, nvidia-smi and llama.cpp, so they run anywhere. The tests that need torch skip themselves when it isn't installed. The end-to-end tests load real models and are skipped unless you point them at small checkpoints:
+
+```bash
+DIGVIJAY_LLM_TEST_GGUF=models/stories15M-q8_0.gguf \
+DIGVIJAY_LLM_TEST_HF=models/tiny-random-LlamaForCausalLM \
+DIGVIJAY_LLM_TEST_RAM_GB=4 \
+python -m unittest tests.test_integration -v
+```
+
+They exercise generate, stream, early stop, chat and benchmark on each backend. Set `DIGVIJAY_LLM_TEST_RAM_GB` to also check peak memory.
+
+---
+
 ## Project layout
 
 ```
@@ -230,6 +272,7 @@ digvijay_llm/               ← repo root
 ├── digvijay_llm/           ← the package
 │   ├── __init__.py
 │   ├── api.py
+│   ├── context.py
 │   ├── engine_gguf.py
 │   ├── engine_safetensors.py
 │   ├── hardware.py
@@ -238,7 +281,10 @@ digvijay_llm/               ← repo root
 │   ├── run_gguf_example.py
 │   └── run_safetensors_example.py
 ├── tests/
+│   ├── test_api_and_engines.py
+│   ├── test_gpu_detection.py
 │   ├── test_hardware_detection.py
+│   ├── test_integration.py ← opt-in, needs real models
 │   └── test_ram_planner.py
 ├── .github/
 │   └── workflows/

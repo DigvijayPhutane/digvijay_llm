@@ -22,7 +22,8 @@ print(plan)
 for w in plan.warnings:
     print("WARNING:", w)
 
-llm = LowRAMLLM.from_gguf(MODEL_PATH, n_ram_gb=16, n_gpu_layers=0)
+# n_gpu_layers is auto-detected; pass 0 to force CPU or -1 to offload every layer.
+llm = LowRAMLLM.from_gguf(MODEL_PATH, n_ram_gb=16)
 print(llm)
 
 print("\n--- Non-streaming generation ---")

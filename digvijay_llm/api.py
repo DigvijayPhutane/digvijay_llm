@@ -10,7 +10,7 @@ streaming) based on what's passed in, and exposes one consistent
 import os
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
-from .hardware import detect_params
+from .hardware import detect_params, is_gguf_path
 
 
 class LowRAMLLM:
@@ -35,8 +35,8 @@ class LowRAMLLM:
     def from_gguf(
         cls,
         model_path: str,
-        n_ram_gb: float = 16.0,
-        n_gpu_layers: int = 0,
+        n_ram_gb: Optional[float] = None,
+        n_gpu_layers: Optional[int] = None,
         n_threads: Optional[int] = None,
         verbose: bool = False,
         detect: bool = True,
@@ -44,6 +44,8 @@ class LowRAMLLM:
         n_batch: Optional[int] = None,
         device: Optional[str] = None,
     ) -> "LowRAMLLM":
+        """Load a .gguf model. Leave an argument as None to auto-tune it;
+        pass n_gpu_layers=0 to force CPU, or -1 to offload every layer."""
         from .engine_gguf import GGUFStreamingEngine
 
         cfg = detect_params(
@@ -57,28 +59,16 @@ class LowRAMLLM:
             n_ram_gb=n_ram_gb,
             device=device,
         )
-        if n_ram_gb is None or n_ram_gb == 16.0 and not detect:
-            n_ram_gb = cfg["n_ram_gb"]
-        if n_gpu_layers == 0 and detect:
-            n_gpu_layers = cfg["n_gpu_layers"]
-        if n_threads is None:
-            n_threads = cfg["n_threads"]
-        if n_ctx is None:
-            n_ctx = cfg["n_ctx"]
-        if n_batch is None:
-            n_batch = cfg["n_batch"]
-        if device is None:
-            device = cfg["device"]
 
         engine = GGUFStreamingEngine(
             model_path=model_path,
-            n_ram_gb=n_ram_gb,
-            n_gpu_layers=n_gpu_layers,
-            n_threads=n_threads,
+            n_ram_gb=cfg["n_ram_gb"],
+            n_gpu_layers=cfg["n_gpu_layers"],
+            n_threads=cfg["n_threads"],
             verbose=verbose,
-            n_ctx=n_ctx,
-            n_batch=n_batch,
-            device=device,
+            n_ctx=cfg["n_ctx"],
+            n_batch=cfg["n_batch"],
+            device=cfg["device"],
         )
         return cls(engine, backend="gguf-mmap", config=cfg)
 
@@ -87,7 +77,7 @@ class LowRAMLLM:
         cls,
         model_dir: str,
         offload_dir: Optional[str] = None,
-        n_ram_gb: float = 16.0,
+        n_ram_gb: Optional[float] = None,
         dtype: str = "float16",
         detect: bool = True,
         device: Optional[str] = None,
@@ -105,30 +95,22 @@ class LowRAMLLM:
             n_ctx=n_ctx,
             n_batch=n_batch,
         )
-        if n_ram_gb is None or n_ram_gb == 16.0 and not detect:
-            n_ram_gb = cfg["n_ram_gb"]
-        if device is None:
-            device = cfg["device"]
-        if n_ctx is None:
-            n_ctx = cfg["n_ctx"]
-        if n_batch is None:
-            n_batch = cfg["n_batch"]
 
         engine = SafetensorsLayerStreamer(
             model_dir=model_dir,
             offload_dir=offload_dir,
-            n_ram_gb=n_ram_gb,
+            n_ram_gb=cfg["n_ram_gb"],
             dtype=dtype,
-            device=device,
-            n_ctx=n_ctx,
-            n_batch=n_batch,
+            device=cfg["device"],
+            n_ctx=cfg["n_ctx"],
+            n_batch=cfg["n_batch"],
         )
         return cls(engine, backend="safetensors-layer-stream", config=cfg)
 
     @classmethod
-    def auto(cls, path: str, n_ram_gb: float = 16.0, **kwargs) -> "LowRAMLLM":
+    def auto(cls, path: str, n_ram_gb: Optional[float] = None, **kwargs) -> "LowRAMLLM":
         """Detects whether `path` is a .gguf file or an HF checkpoint dir."""
-        if os.path.isfile(path) and path.endswith(".gguf"):
+        if os.path.isfile(path) and is_gguf_path(path):
             return cls.from_gguf(path, n_ram_gb=n_ram_gb, **kwargs)
         if os.path.isdir(path):
             has_st = any(f.endswith(".safetensors") for f in os.listdir(path))
@@ -151,11 +133,7 @@ class LowRAMLLM:
             yield from self._engine.stream_generate(prompt, max_tokens=max_tokens, temperature=temperature, callback=callback)
 
     def chat(self, messages: List[Dict[str, str]], max_tokens: int = 256, temperature: float = 0.7) -> str:
-        if self.backend == "gguf-mmap":
-            return self._engine.chat(messages, max_tokens=max_tokens, temperature=temperature)
-        # Fallback for safetensors backend: flatten chat messages into a prompt
-        prompt = "\n".join(f"{m['role']}: {m['content']}" for m in messages) + "\nassistant:"
-        return self._engine.generate(prompt, max_tokens=max_tokens, temperature=temperature)
+        return self._engine.chat(messages, max_tokens=max_tokens, temperature=temperature)
 
     def benchmark(self, prompt: str, max_tokens: int = 64) -> Dict[str, Any]:
         if hasattr(self._engine, "benchmark"):

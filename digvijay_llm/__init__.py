@@ -27,10 +27,9 @@ Two backends are provided:
    - Recommended for real, fast usage. Requires a .gguf quantized model file.
 
 2. SafetensorsLayerStreamer
-   - A pure PyTorch engine written from scratch in this library that loads
-     a HuggingFace-format (.safetensors) checkpoint ONE TRANSFORMER LAYER
-     AT A TIME directly from disk, runs the forward pass for that layer,
-     then frees it before loading the next layer.
+   - Loads a HuggingFace-format (.safetensors) checkpoint with
+     transformers + accelerate disk offload: layers that don't fit the RAM
+     budget stay on disk and are pulled in for their forward pass.
    - Useful when you only have raw HF weights and don't want to convert to
      GGUF, or want full Python-level control over the streaming behavior.
 
@@ -64,4 +63,4 @@ __all__ = [
     "recommend_config",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

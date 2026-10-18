@@ -17,7 +17,29 @@ import os
 import time
 from typing import Any, Callable, Dict, Iterator, Optional
 
+from .context import apply_keep, fit_messages, fit_to_context
+
 logger = logging.getLogger("digvijay_llm")
+
+
+class _CapturedPrompt(Exception):
+    def __init__(self, prompt):
+        super().__init__("prompt captured")
+        self.prompt = prompt
+
+
+class _PromptCapture:
+    """Stands in for a Llama so a chat handler renders its prompt without
+    running the model: everything is delegated except create_completion."""
+
+    def __init__(self, llm):
+        self._llm = llm
+
+    def __getattr__(self, name):
+        return getattr(self._llm, name)
+
+    def create_completion(self, *args, **kwargs):
+        raise _CapturedPrompt(kwargs["prompt"] if "prompt" in kwargs else args[0])
 
 
 class GGUFStreamingEngine:
@@ -38,7 +60,8 @@ class GGUFStreamingEngine:
     n_gpu_layers : int
         Number of layers to offload to GPU if you have one (0 = pure CPU+
         disk streaming, which is the "low RAM" use case this library is
-        built for).
+        built for; -1 = every layer). Requires a GPU-enabled build of
+        llama-cpp-python.
     n_threads : Optional[int]
         CPU threads to use. Defaults to os.cpu_count().
     """
@@ -65,12 +88,13 @@ class GGUFStreamingEngine:
                 "Install it with: pip install llama-cpp-python"
             ) from e
 
+        n_ram_gb = n_ram_gb or 16.0
         self.model_path = model_path
         self.n_ram_gb = n_ram_gb
         self.device = device or "cpu"
         self.n_gpu_layers = n_gpu_layers
         self.n_threads = n_threads or os.cpu_count() or 1
-        self.n_batch = n_batch or 4
+        self.n_batch = n_batch or 512  # llama.cpp's default; tiny batches make prompt processing crawl
 
         # Conservative context size: bigger context = bigger KV cache = more
         # RAM. We scale it down automatically on tight budgets.
@@ -84,6 +108,7 @@ class GGUFStreamingEngine:
             ctx = 4096
         else:
             ctx = 8192
+        self.n_batch = min(self.n_batch, ctx)
 
         try:
             self._llm = Llama(
@@ -100,6 +125,17 @@ class GGUFStreamingEngine:
             raise RuntimeError(f"Failed to initialize llama.cpp backend for '{model_path}': {exc}") from exc
         self._ctx_size = ctx
 
+    def _fit_prompt(self, prompt: str, max_tokens: int):
+        """Return (prompt, max_tokens) that fit the context window.
+
+        The prompt stays a string when it fits (so llama.cpp tokenizes it as
+        usual); a too-long prompt is left-truncated and passed as token ids.
+        """
+        tokens = self._llm.tokenize(prompt.encode("utf-8"))
+        first_is_bos = bool(tokens) and tokens[0] == self._llm.token_bos()
+        keep, max_tokens = fit_to_context(len(tokens), max_tokens, self._ctx_size, first_is_bos)
+        return (prompt if keep is None else apply_keep(tokens, keep)), max_tokens
+
     def generate(
         self,
         prompt: str,
@@ -112,48 +148,113 @@ class GGUFStreamingEngine:
         if stream:
             return self._stream(prompt, max_tokens, temperature, top_p, callback)
 
+        prompt_in, max_tokens = self._fit_prompt(prompt, max_tokens)
         out = self._llm(
-            prompt,
+            prompt_in,
             max_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
         )
-        return out["choices"][0]["text"]
+        text = out["choices"][0]["text"]
+        if callback is not None:
+            callback(text)
+        return text
 
     def _stream(self, prompt, max_tokens, temperature, top_p, callback) -> Iterator[str]:
+        prompt_in, max_tokens = self._fit_prompt(prompt, max_tokens)
         for chunk in self._llm(
-            prompt,
+            prompt_in,
             max_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
             stream=True,
         ):
             text = chunk["choices"][0]["text"]
+            if not text:  # llama.cpp emits "" while a multi-byte character is incomplete
+                continue
             if callback is not None:
                 callback(text)
             yield text
 
+    def _chat_prompt_len(self, messages) -> int:
+        """Token length of the prompt llama.cpp will build for `messages`.
+
+        Runs the same chat handler create_chat_completion would pick, against
+        a stand-in that captures the rendered prompt instead of generating.
+        """
+        llm = self._llm
+        try:
+            # Same lookup order as Llama.create_chat_completion.
+            handler = getattr(llm, "chat_handler", None) or getattr(llm, "_chat_handlers", {}).get(llm.chat_format)
+            if handler is None:
+                from llama_cpp import llama_chat_format
+
+                handler = llama_chat_format.get_chat_completion_handler(llm.chat_format)
+            handler(llama=_PromptCapture(llm), messages=messages)
+        except _CapturedPrompt as captured:
+            prompt = captured.prompt
+            if isinstance(prompt, str):
+                prompt = llm.tokenize(prompt.encode("utf-8"), special=True)
+            return len(prompt)
+        except Exception as exc:
+            logger.debug("Could not render the chat prompt (%s); estimating its length", exc)
+        # Estimate: message text plus a few template tokens per message.
+        return sum(len(llm.tokenize(str(m.get("content") or "").encode("utf-8"), add_bos=False)) + 8 for m in messages)
+
     def chat(self, messages, max_tokens: int = 256, temperature: float = 0.7):
         """OpenAI-style chat interface, e.g.
-        messages=[{"role": "user", "content": "hi"}]"""
+        messages=[{"role": "user", "content": "hi"}]
+
+        If the conversation doesn't fit n_ctx, the oldest messages are
+        dropped (system messages are kept); see context.fit_messages.
+        """
+        messages, max_tokens = fit_messages(messages, self._chat_prompt_len, max_tokens, self._ctx_size)
         out = self._llm.create_chat_completion(
             messages=messages, max_tokens=max_tokens, temperature=temperature
         )
         return out["choices"][0]["message"]["content"]
 
     def benchmark(self, prompt: str, max_tokens: int = 64) -> Dict[str, Any]:
+        """Greedy-decode `max_tokens` and time it with real model tokens.
+
+        ttft_s is prompt processing + first token; tokens_per_sec is the
+        decode rate over the tokens after the first one.
+        """
+        prompt_ids = self._llm.tokenize(prompt.encode("utf-8"))
+        first_is_bos = bool(prompt_ids) and prompt_ids[0] == self._llm.token_bos()
+        keep, max_tokens = fit_to_context(len(prompt_ids), max_tokens, self._ctx_size, first_is_bos)
+        prompt_ids = apply_keep(prompt_ids, keep)
+        eos = self._llm.token_eos()
+        completion_tokens = 0
+        first_token_at = None
+
         start = time.perf_counter()
-        text = self.generate(prompt, max_tokens=max_tokens)
-        elapsed = time.perf_counter() - start
-        prompt_tokens = max(1, len(prompt.split()))
-        completion_tokens = max(1, len(text.split()))
+        generator = self._llm.generate(prompt_ids, temp=0.0, top_p=1.0, reset=True)
+        try:
+            for token in generator:
+                if first_token_at is None:
+                    first_token_at = time.perf_counter()
+                if token == eos:
+                    break
+                completion_tokens += 1
+                if completion_tokens >= max_tokens:
+                    break
+        finally:
+            generator.close()
+        end = time.perf_counter()
+
+        ttft = (first_token_at or end) - start
+        decode_time = end - (first_token_at or end)
+        decode_tokens = max(completion_tokens - 1, 0)
         return {
-            "ttft_s": round(elapsed, 4),
-            "tokens_per_sec": round(completion_tokens / max(elapsed, 1e-6), 2),
-            "prompt_tokens": prompt_tokens,
+            "ttft_s": round(ttft, 4),
+            "total_s": round(end - start, 4),
+            "tokens_per_sec": round(decode_tokens / decode_time, 2) if decode_tokens and decode_time > 0 else 0.0,
+            "prompt_tokens": len(prompt_ids),
             "completion_tokens": completion_tokens,
             "backend": "gguf",
             "device": self.device,
+            "n_gpu_layers": self.n_gpu_layers,
         }
 
     @property

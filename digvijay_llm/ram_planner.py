@@ -9,6 +9,13 @@ model will even fit on disk + meet a minimum tokens/sec expectation.
 This is intentionally simple/heuristic — its job is to stop people from
 footgunning themselves (e.g. trying to keep 40 layers "hot" on a 16GB
 machine) rather than to be a perfect simulator.
+
+The numbers are ESTIMATES, not a guarantee that a model will load. The
+per-layer size is total weights / n_layers, which ignores that embeddings
+and the output head are usually larger than one block, and the fixed
+overhead margin does not model the real KV cache (which grows with
+context length), activations, or runtime/framework overhead for a given
+architecture. Measure real usage before relying on a plan.
 """
 
 from dataclasses import dataclass
@@ -44,13 +51,16 @@ def plan_for_budget(
     os_reserve_gb: float = 2.5,
 ) -> RAMPlan:
     """
-    Compute a conservative streaming plan: how many transformer layers can
-    be kept resident in RAM simultaneously without exceeding the budget.
+    Estimate how many transformer layers can be kept resident in RAM
+    simultaneously without exceeding the budget. See the module docstring
+    for what this estimate leaves out.
     """
     warnings = []
     usable = max(n_ram_gb - os_reserve_gb, 1.0)
 
     total_weight_gb = (total_params_billion * 1e9 * bytes_per_param) / (1024 ** 3)
+    # Average over all weights: embeddings / output head are folded in, so
+    # this understates the largest tensors and overstates a typical block.
     layer_size_gb = total_weight_gb / max(n_layers, 1)
 
     # Keep a safety margin for activations / KV cache / runtime overhead
